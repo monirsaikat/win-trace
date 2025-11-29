@@ -164,6 +164,7 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 #include <unistd.h>
 
 #include <algorithm>
