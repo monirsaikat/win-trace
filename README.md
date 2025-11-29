@@ -1,6 +1,6 @@
-﻿# Win Trace
+# Win Trace
 
-Native Node.js addon that returns details about the current foreground window on Windows. It reports the process name, executable path, and window title, and tries to grab the browser URL via Windows UI Automation (best effort for Chromium browsers).
+Native Node.js addon that returns details about the current foreground window on Windows and Linux (X11). It reports the process name, executable path, and window title, and on Windows tries to grab the browser URL via UI Automation (best effort for Chromium browsers).
 
 ## Build
 
@@ -8,6 +8,8 @@ Native Node.js addon that returns details about the current foreground window on
 npm install
 npm run build
 ```
+
+On Linux make sure the X11 headers/libraries are installed (for example `sudo apt install libx11-dev`). Wayland-only sessions are not supported; run under X11 or an XWayland compatibility layer.
 
 ## Usage
 
@@ -27,8 +29,8 @@ console.log({
 });
 ```
 
-- Fields provided: `processName`, `exePath`, `title`, `url`, `website`, `appName`, numeric `id` (HWND), `bounds`, `owner` (name/processId/path), and `memoryUsage` (working set bytes).
+- Fields provided: `processName`, `exePath`, `title`, `url`, `website`, `appName`, numeric `id` (HWND or X11 window id), `bounds`, `owner` (name/processId/path), and `memoryUsage` (working set bytes).
 - Run `node test.js` to stream the active window info every second from Node.
-- Windows-only; relies on Win32 APIs and UI Automation.
+- Windows and Linux (X11); Linux builds provide the same window/process metadata but URLs are currently Windows-only.
 - URL extraction mainly tested with Chrome in English. Other browsers may return `null`.
 - Intended for Electron main process polling (for example every second) to watch the active window.

@@ -13,18 +13,28 @@
       "dependencies": [
         "<!(node -p \"require('node-addon-api').gyp\")"
       ],
-      "libraries": [
-        "uiautomationcore.lib"
-      ],
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS"
       ],
-      "cflags_cc": ["/std:c++17"],
-      "msvs_settings": {
-        "VCCLCompilerTool": {
-          "AdditionalOptions": ["/std:c++17"]
-        }
-      }
+      "conditions": [
+        ["OS=='win'", {
+          "libraries": [
+            "uiautomationcore.lib"
+          ],
+          "cflags_cc": ["/std:c++17"],
+          "msvs_settings": {
+            "VCCLCompilerTool": {
+              "AdditionalOptions": ["/std:c++17"]
+            }
+          }
+        }],
+        ["OS=='linux'", {
+          "libraries": [
+            "-lX11"
+          ],
+          "cflags_cc": ["-std=c++17"]
+        }]
+      ]
     }
   ]
 }
