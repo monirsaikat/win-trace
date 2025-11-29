@@ -30,7 +30,11 @@
         }],
         ["OS=='linux'", {
           "libraries": [
-            "-lX11"
+            "-lX11",
+            "<!@(pkg-config --libs atspi-2)"
+          ],
+          "cflags": [
+            "<!@(pkg-config --cflags atspi-2)"
           ],
           "cflags_cc": ["-std=c++17"]
         }]

@@ -165,15 +165,19 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <atspi/atspi.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include <glib.h>
 
 namespace {
 
@@ -368,6 +372,328 @@ std::string ExtractNameFromPath(const std::string& path) {
     return ToLower(path);
 }
 
+void FreeGError(GError*& error) {
+    if (error) {
+        g_error_free(error);
+        error = nullptr;
+    }
+}
+
+std::string Trim(const std::string& value) {
+    const std::string whitespace = " \t\n\r";
+    size_t start = value.find_first_not_of(whitespace);
+    if (start == std::string::npos) {
+        return std::string();
+    }
+    size_t end = value.find_last_not_of(whitespace);
+    return value.substr(start, end - start + 1);
+}
+
+bool StartsWithIgnoreCase(const std::string& value, const std::string& prefix) {
+    if (value.size() < prefix.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(value[i])) !=
+            std::tolower(static_cast<unsigned char>(prefix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool LooksLikeUrl(const std::string& rawValue) {
+    std::string value = Trim(rawValue);
+    if (value.empty()) {
+        return false;
+    }
+    std::string lower = ToLower(value);
+    static const std::vector<std::string> kKnownSchemes = {
+        "http:",   "https:", "file:",  "about:", "chrome:", "googlechrome:",
+        "edge:",   "brave:", "opera:", "vivaldi:", "moz-extension:", "gopher:"
+    };
+    for (const auto& scheme : kKnownSchemes) {
+        if (StartsWithIgnoreCase(lower, scheme)) {
+            return true;
+        }
+    }
+    if (lower.rfind("www.", 0) == 0) {
+        return true;
+    }
+    if (lower.find("://") != std::string::npos) {
+        return true;
+    }
+    size_t dot = lower.find('.');
+    if (dot != std::string::npos && dot + 1 < lower.size() &&
+        lower.find(' ') == std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+struct BrowserLocator {
+    const char* processName;
+    std::vector<std::string> keywords;
+};
+
+const BrowserLocator& GetBrowserLocator(const std::string& processName) {
+    static const BrowserLocator kLocators[] = {
+        {"firefox", {"address", "search with", "url", "awesome bar", "url bar"}},
+        {"chrome", {"address and search", "omnibox", "url"}},
+        {"chromium", {"address and search", "omnibox", "url"}},
+        {"google-chrome", {"address and search", "omnibox", "url"}},
+        {"msedge", {"search or enter web address", "address and search", "url"}},
+        {"microsoft-edge", {"search or enter web address", "address and search", "url"}},
+        {"brave", {"address and search", "url"}},
+        {"opera", {"address field", "search", "url"}},
+        {"vivaldi", {"address", "search", "url"}},
+    };
+    for (const auto& locator : kLocators) {
+        if (processName == locator.processName) {
+            return locator;
+        }
+    }
+    static const BrowserLocator kDefault = {"", {"address", "search", "url", "omnibox"}};
+    return kDefault;
+}
+
+bool EnsureAtspiInitialized() {
+    static bool attempted = false;
+    static bool initialized = false;
+    if (attempted) {
+        return initialized;
+    }
+    attempted = true;
+    initialized = atspi_init();
+    return initialized;
+}
+
+int ScoreEntryNode(AtspiAccessible* node, const BrowserLocator& locator) {
+    if (!node) {
+        return 0;
+    }
+    GError* error = nullptr;
+    AtspiRole role = atspi_accessible_get_role(node, &error);
+    FreeGError(error);
+    if (role != ATSPI_ROLE_ENTRY && role != ATSPI_ROLE_TEXT) {
+        return 0;
+    }
+
+    AtspiStateSet* states = atspi_accessible_get_state_set(node);
+    if (!states) {
+        return 0;
+    }
+    bool editable = atspi_state_set_contains(states, ATSPI_STATE_EDITABLE);
+    bool focusable = atspi_state_set_contains(states, ATSPI_STATE_FOCUSABLE);
+    bool enabled = atspi_state_set_contains(states, ATSPI_STATE_ENABLED);
+    bool focused = atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
+    g_object_unref(states);
+    if (!editable || !focusable || !enabled) {
+        return 0;
+    }
+
+    int score = 1;
+    if (focused) {
+        score += 2;
+    }
+
+    GError* nameError = nullptr;
+    gchar* nameChars = atspi_accessible_get_name(node, &nameError);
+    FreeGError(nameError);
+    std::string lowerName = nameChars ? ToLower(nameChars) : std::string();
+    if (nameChars) {
+        g_free(nameChars);
+    }
+
+    if (!lowerName.empty()) {
+        for (const auto& keyword : locator.keywords) {
+            if (!keyword.empty() && lowerName.find(keyword) != std::string::npos) {
+                score += 4;
+                break;
+            }
+        }
+        static const std::vector<std::string> kGenericKeywords = {"address", "search", "url",
+                                                                  "location", "omnibox"};
+        for (const auto& keyword : kGenericKeywords) {
+            if (!keyword.empty() && lowerName.find(keyword) != std::string::npos) {
+                score += 2;
+                break;
+            }
+        }
+    }
+
+    GError* parentError = nullptr;
+    AtspiAccessible* parent = atspi_accessible_get_parent(node, &parentError);
+    FreeGError(parentError);
+    if (parent) {
+        GError* roleError = nullptr;
+        AtspiRole parentRole = atspi_accessible_get_role(parent, &roleError);
+        FreeGError(roleError);
+        if (parentRole == ATSPI_ROLE_TOOL_BAR || parentRole == ATSPI_ROLE_PANEL) {
+            score += 1;
+        }
+        g_object_unref(parent);
+    }
+
+    return score;
+}
+
+std::string ExtractUrlFromNode(AtspiAccessible* node) {
+    if (!node) {
+        return std::string();
+    }
+    AtspiText* textIface = atspi_accessible_get_text_iface(node);
+    if (!textIface) {
+        return std::string();
+    }
+    GError* error = nullptr;
+    gchar* rawValue = atspi_text_get_text(textIface, 0, -1, &error);
+    FreeGError(error);
+    if (!rawValue) {
+        return std::string();
+    }
+    std::string value(rawValue);
+    g_free(rawValue);
+    value = Trim(value);
+    if (value.size() > 4096) {
+        value.resize(4096);
+    }
+    if (LooksLikeUrl(value)) {
+        return value;
+    }
+    return std::string();
+}
+
+void ReleaseQueue(std::deque<AtspiAccessible*>& queue) {
+    while (!queue.empty()) {
+        g_object_unref(queue.front());
+        queue.pop_front();
+    }
+}
+
+AtspiAccessible* FindAccessibleForPid(pid_t pid) {
+    if (!EnsureAtspiInitialized()) {
+        return nullptr;
+    }
+
+    const size_t kMaxVisitedPerDesktop = 2048;
+    gint desktopCount = atspi_get_desktop_count();
+
+    for (gint desktopIndex = 0; desktopIndex < desktopCount; ++desktopIndex) {
+        AtspiAccessible* desktop = atspi_get_desktop(desktopIndex);
+        if (!desktop) {
+            continue;
+        }
+
+        std::deque<AtspiAccessible*> queue;
+        queue.push_back(g_object_ref(desktop));
+        size_t visited = 0;
+        AtspiAccessible* match = nullptr;
+
+        while (!queue.empty() && visited < kMaxVisitedPerDesktop) {
+            AtspiAccessible* node = queue.front();
+            queue.pop_front();
+            ++visited;
+
+            GError* pidError = nullptr;
+            gint nodePid = atspi_accessible_get_process_id(node, &pidError);
+            FreeGError(pidError);
+            if (nodePid == pid) {
+                match = node;
+                ReleaseQueue(queue);
+                break;
+            }
+
+            GError* countError = nullptr;
+            gint childCount = atspi_accessible_get_child_count(node, &countError);
+            FreeGError(countError);
+            for (gint i = 0; i < childCount; ++i) {
+                GError* childError = nullptr;
+                AtspiAccessible* child = atspi_accessible_get_child_at_index(node, i, &childError);
+                FreeGError(childError);
+                if (child) {
+                    queue.push_back(child);
+                }
+            }
+            g_object_unref(node);
+        }
+
+        if (match) {
+            ReleaseQueue(queue);
+            if (desktop != match) {
+                g_object_unref(desktop);
+            }
+            return match;
+        }
+
+        ReleaseQueue(queue);
+        g_object_unref(desktop);
+    }
+    return nullptr;
+}
+
+std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locator) {
+    if (!root) {
+        return std::string();
+    }
+
+    const size_t kMaxNodes = 6000;
+    std::deque<AtspiAccessible*> queue;
+    queue.push_back(g_object_ref(root));
+    size_t visited = 0;
+    int bestScore = 0;
+    std::string bestUrl;
+
+    while (!queue.empty() && visited < kMaxNodes) {
+        AtspiAccessible* node = queue.front();
+        queue.pop_front();
+        ++visited;
+
+        int score = ScoreEntryNode(node, locator);
+        if (score > 0) {
+            std::string value = ExtractUrlFromNode(node);
+            if (!value.empty()) {
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestUrl = value;
+                    if (score >= 6 && value.find("://") != std::string::npos) {
+                        g_object_unref(node);
+                        break;
+                    }
+                }
+            }
+        }
+
+        GError* countError = nullptr;
+        gint childCount = atspi_accessible_get_child_count(node, &countError);
+        FreeGError(countError);
+        for (gint i = 0; i < childCount; ++i) {
+            GError* childError = nullptr;
+            AtspiAccessible* child = atspi_accessible_get_child_at_index(node, i, &childError);
+            FreeGError(childError);
+            if (child) {
+                queue.push_back(child);
+            }
+        }
+        g_object_unref(node);
+    }
+
+    ReleaseQueue(queue);
+    return bestUrl;
+}
+
+std::string QueryBrowserUrl(pid_t pid, const std::string& processName) {
+    AtspiAccessible* root = FindAccessibleForPid(pid);
+    if (!root) {
+        return std::string();
+    }
+
+    const BrowserLocator& locator = GetBrowserLocator(processName);
+    std::string url = SearchAddressBar(root, locator);
+    g_object_unref(root);
+    return url;
+}
+
 }  // namespace
 
 bool GetActiveWindowInfo(ActiveWindowInfo& info) {
@@ -402,7 +728,18 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
     info.owner.bundleId = info.processName;
     info.owner.path = info.exePath;
     info.owner.processId = info.processId;
-    info.browserUrl.clear();
+
+    static const std::vector<std::string> kBrowserNames = {
+        "firefox", "chrome",  "chromium", "google-chrome", "msedge",
+        "brave",   "opera",   "vivaldi",  "microsoft-edge"};
+    bool isBrowser =
+        std::find(kBrowserNames.begin(), kBrowserNames.end(), info.processName) !=
+        kBrowserNames.end();
+    if (isBrowser) {
+        info.browserUrl = QueryBrowserUrl(static_cast<pid_t>(info.processId), info.processName);
+    } else {
+        info.browserUrl.clear();
+    }
     return true;
 }
 
