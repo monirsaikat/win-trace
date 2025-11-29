@@ -1,4 +1,4 @@
-﻿# my-activewin-addon
+﻿# Win Trace
 
 Native Node.js addon that returns details about the current foreground window on Windows. It reports the process name, executable path, and window title, and tries to grab the browser URL via Windows UI Automation (best effort for Chromium browsers).
 
@@ -12,7 +12,7 @@ npm run build
 ## Usage
 
 ```js
-const { getActiveWindow } = require('my-activewin-addon');
+const { getActiveWindow } = require('win-trace');
 
 const info = getActiveWindow();
 console.log({
