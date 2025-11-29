@@ -1,0 +1,17 @@
+﻿{
+  "name": "my-activewin-addon",
+  "version": "1.0.0",
+  "description": "Native addon to query active window info and browser URLs on Windows",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.1.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0"
+  },
+  "gypfile": true
+}

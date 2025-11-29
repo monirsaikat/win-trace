@@ -1,0 +1,9 @@
+﻿node_modules/
+build/
+*.log
+*.pdb
+*.obj
+*.exp
+*.lib
+.vs/
+.vscode/
