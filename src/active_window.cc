@@ -965,7 +965,7 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
     return bestUrl;
 }
 
-AtspiAccessible* FindAccessibleByName(const std::string& processName) {
+AtspiAccessible* FindAccessibleByName(const std::string& processName, const std::string& windowTitle) {
     if (processName.empty()) {
         return nullptr;
     }
@@ -975,6 +975,7 @@ AtspiAccessible* FindAccessibleByName(const std::string& processName) {
          return nullptr;
     }
 
+    std::string lowerTitle = ToLower(windowTitle);
     gint desktopCount = atspi_get_desktop_count();
     for (gint desktopIndex = 0; desktopIndex < desktopCount; ++desktopIndex) {
         AtspiAccessible* desktop = atspi_get_desktop(desktopIndex);
@@ -988,50 +989,82 @@ AtspiAccessible* FindAccessibleByName(const std::string& processName) {
 
         for (gint i = 0; i < childCount; ++i) {
             GError* childError = nullptr;
-            AtspiAccessible* child = atspi_accessible_get_child_at_index(desktop, i, &childError);
+            AtspiAccessible* app = atspi_accessible_get_child_at_index(desktop, i, &childError);
             FreeGError(childError);
-            if (!child) {
+            if (!app) {
                 continue;
             }
 
             GError* nameError = nullptr;
-            gchar* nameChars = atspi_accessible_get_name(child, &nameError);
+            gchar* nameChars = atspi_accessible_get_name(app, &nameError);
             FreeGError(nameError);
-            std::string name = nameChars ? ToLower(nameChars) : std::string();
+            std::string appName = nameChars ? ToLower(nameChars) : std::string();
             if (nameChars) {
                 g_free(nameChars);
             }
 
-            if (name.find(processName) != std::string::npos) {
-                // Check if active/focused to be sure it's the right window
-                AtspiStateSet* states = atspi_accessible_get_state_set(child);
-                bool isActive = false;
-                if (states) {
-                    isActive = atspi_state_set_contains(states, ATSPI_STATE_ACTIVE) ||
-                               atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
-                    g_object_unref(states);
-                }
-                
-                if (isActive) {
-                    DebugLog("Found accessibility root by name '%s' matching '%s'", name.c_str(), processName.c_str());
-                    g_object_unref(desktop);
-                    return child;
+            if (appName.find(processName) != std::string::npos) {
+                // Found a matching app, now check its children (Windows) for title match
+                GError* appChildCountError = nullptr;
+                gint appChildCount = atspi_accessible_get_child_count(app, &appChildCountError);
+                FreeGError(appChildCountError);
+
+                for (gint j = 0; j < appChildCount; ++j) {
+                    GError* winError = nullptr;
+                    AtspiAccessible* window = atspi_accessible_get_child_at_index(app, j, &winError);
+                    FreeGError(winError);
+                    if (!window) continue;
+
+                    GError* winNameError = nullptr;
+                    gchar* winNameChars = atspi_accessible_get_name(window, &winNameError);
+                    FreeGError(winNameError);
+                    std::string winName = winNameChars ? ToLower(winNameChars) : std::string();
+                    if (winNameChars) {
+                        g_free(winNameChars);
+                    }
+                    
+                    // Check if window name matches title (or contains it, or vice versa)
+                    // Browsers often append " - Browser Name" to the title
+                    if (!lowerTitle.empty() && !winName.empty()) {
+                         if (winName == lowerTitle || winName.find(lowerTitle) != std::string::npos || lowerTitle.find(winName) != std::string::npos) {
+                             DebugLog("Found accessibility window by title match: '%s' (App: '%s')", winName.c_str(), appName.c_str());
+                             g_object_unref(app);
+                             g_object_unref(desktop);
+                             return window;
+                         }
+                    }
+                    
+                    // Fallback: check if window is active/focused if title match fails or title is empty
+                    AtspiStateSet* states = atspi_accessible_get_state_set(window);
+                    bool isActive = false;
+                    if (states) {
+                        isActive = atspi_state_set_contains(states, ATSPI_STATE_ACTIVE) ||
+                                   atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
+                        g_object_unref(states);
+                    }
+                    if (isActive) {
+                         DebugLog("Found accessibility window by active state: '%s' (App: '%s')", winName.c_str(), appName.c_str());
+                         g_object_unref(app);
+                         g_object_unref(desktop);
+                         return window;
+                    }
+                    g_object_unref(window);
                 }
             }
-            g_object_unref(child);
+            g_object_unref(app);
         }
         g_object_unref(desktop);
     }
     return nullptr;
 }
 
-std::string QueryBrowserUrl(pid_t pid, const std::string& processName) {
+std::string QueryBrowserUrl(pid_t pid, const std::string& processName, const std::string& windowTitle) {
     AtspiAccessible* root = FindAccessibleForPid(pid);
     if (!root) {
         DebugLog("No accessibility root found for pid %d, trying name match for %s", pid, processName.c_str());
         // Ensure env is set up even if we search by name, using the PID we have
         EnsureAtspiInitializedForPid(pid);
-        root = FindAccessibleByName(processName);
+        root = FindAccessibleByName(processName, windowTitle);
     }
 
     if (!root) {
@@ -1087,7 +1120,7 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
         std::find(kBrowserNames.begin(), kBrowserNames.end(), info.processName) !=
         kBrowserNames.end();
     if (isBrowser) {
-        info.browserUrl = QueryBrowserUrl(static_cast<pid_t>(info.processId), info.processName);
+        info.browserUrl = QueryBrowserUrl(static_cast<pid_t>(info.processId), info.processName, info.title);
     } else {
         info.browserUrl.clear();
     }
