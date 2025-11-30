@@ -965,10 +965,77 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
     return bestUrl;
 }
 
+AtspiAccessible* FindAccessibleByName(const std::string& processName) {
+    if (processName.empty()) {
+        return nullptr;
+    }
+    
+    // Try to init AT-SPI if not already done.
+    if (!TryAtspiInit()) {
+         return nullptr;
+    }
+
+    gint desktopCount = atspi_get_desktop_count();
+    for (gint desktopIndex = 0; desktopIndex < desktopCount; ++desktopIndex) {
+        AtspiAccessible* desktop = atspi_get_desktop(desktopIndex);
+        if (!desktop) {
+            continue;
+        }
+
+        GError* countError = nullptr;
+        gint childCount = atspi_accessible_get_child_count(desktop, &countError);
+        FreeGError(countError);
+
+        for (gint i = 0; i < childCount; ++i) {
+            GError* childError = nullptr;
+            AtspiAccessible* child = atspi_accessible_get_child_at_index(desktop, i, &childError);
+            FreeGError(childError);
+            if (!child) {
+                continue;
+            }
+
+            GError* nameError = nullptr;
+            gchar* nameChars = atspi_accessible_get_name(child, &nameError);
+            FreeGError(nameError);
+            std::string name = nameChars ? ToLower(nameChars) : std::string();
+            if (nameChars) {
+                g_free(nameChars);
+            }
+
+            if (name.find(processName) != std::string::npos) {
+                // Check if active/focused to be sure it's the right window
+                AtspiStateSet* states = atspi_accessible_get_state_set(child);
+                bool isActive = false;
+                if (states) {
+                    isActive = atspi_state_set_contains(states, ATSPI_STATE_ACTIVE) ||
+                               atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
+                    g_object_unref(states);
+                }
+                
+                if (isActive) {
+                    DebugLog("Found accessibility root by name '%s' matching '%s'", name.c_str(), processName.c_str());
+                    g_object_unref(desktop);
+                    return child;
+                }
+            }
+            g_object_unref(child);
+        }
+        g_object_unref(desktop);
+    }
+    return nullptr;
+}
+
 std::string QueryBrowserUrl(pid_t pid, const std::string& processName) {
     AtspiAccessible* root = FindAccessibleForPid(pid);
     if (!root) {
-        DebugLog("No accessibility root found for pid %d (%s)", pid, processName.c_str());
+        DebugLog("No accessibility root found for pid %d, trying name match for %s", pid, processName.c_str());
+        // Ensure env is set up even if we search by name, using the PID we have
+        EnsureAtspiInitializedForPid(pid);
+        root = FindAccessibleByName(processName);
+    }
+
+    if (!root) {
+        DebugLog("No accessibility root found for pid %d (%s) even by name", pid, processName.c_str());
         return std::string();
     }
 
