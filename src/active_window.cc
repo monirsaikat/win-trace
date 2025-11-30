@@ -178,6 +178,7 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <deque>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -470,6 +471,76 @@ bool AdoptAtspiEnvFromProcess(pid_t pid) {
     return updated;
 }
 
+uid_t ReadProcessUid(pid_t pid) {
+    std::string path = "/proc/" + std::to_string(pid) + "/status";
+    std::ifstream file(path);
+    if (!file) {
+        DebugLog("Failed to open %s", path.c_str());
+        return static_cast<uid_t>(-1);
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.rfind("Uid:", 0) == 0) {
+            std::istringstream stream(line.substr(4));
+            long uidValue = -1;
+            stream >> uidValue;
+            if (uidValue >= 0) {
+                return static_cast<uid_t>(uidValue);
+            }
+            break;
+        }
+    }
+    DebugLog("Could not read UID for pid %d", pid);
+    return static_cast<uid_t>(-1);
+}
+
+bool AdoptAtspiEnvFromUid(uid_t uid) {
+    if (uid == static_cast<uid_t>(-1)) {
+        return false;
+    }
+    std::string uidStr = std::to_string(static_cast<unsigned long>(uid));
+    auto setVar = [&](const char* name, const std::string& value) {
+        const char* current = std::getenv(name);
+        if (current && current[0] != '\0') {
+            return false;
+        }
+        setenv(name, value.c_str(), 1);
+        DebugLog("Synthesized %s from uid %s", name, uidStr.c_str());
+        return true;
+    };
+
+    bool updated = false;
+    std::string dbusPath = "/run/user/" + uidStr + "/bus";
+    if (access(dbusPath.c_str(), F_OK) == 0) {
+        updated = setVar("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + dbusPath) || updated;
+    }
+    std::string atspiPath = "/run/user/" + uidStr + "/at-spi2/bus";
+    if (access(atspiPath.c_str(), F_OK) == 0) {
+        updated = setVar("AT_SPI_BUS_ADDRESS", "unix:path=" + atspiPath) || updated;
+    }
+    if (!updated) {
+        DebugLog("Could not synthesize AT-SPI env for uid %s", uidStr.c_str());
+    }
+    return updated;
+}
+
+bool AdoptAtspiEnv(pid_t pid) {
+    if (AdoptAtspiEnvFromProcess(pid)) {
+        return true;
+    }
+    uid_t uid = ReadProcessUid(pid);
+    if (uid != static_cast<uid_t>(-1) && AdoptAtspiEnvFromUid(uid)) {
+        return true;
+    }
+    return false;
+}
+
+bool AtspiEnvPresent() {
+    const char* bus = std::getenv("DBUS_SESSION_BUS_ADDRESS");
+    const char* atspi = std::getenv("AT_SPI_BUS_ADDRESS");
+    return (bus && bus[0] != '\0') && (atspi && atspi[0] != '\0');
+}
+
 bool TryAtspiInit() {
     bool ok = atspi_init();
     DebugLog("AT-SPI init %s", ok ? "succeeded" : "FAILED");
@@ -479,7 +550,7 @@ bool TryAtspiInit() {
 bool EnsureAtspiInitializedForPid(pid_t pid) {
     static bool initialized = false;
     static bool attemptedDefault = false;
-    static bool attemptedAdopt = false;
+    static bool attemptedFallback = false;
     if (initialized) {
         return true;
     }
@@ -492,13 +563,21 @@ bool EnsureAtspiInitializedForPid(pid_t pid) {
         }
     }
 
-    if (!attemptedAdopt) {
-        attemptedAdopt = true;
-        if (AdoptAtspiEnvFromProcess(pid)) {
+    if (!attemptedFallback) {
+        attemptedFallback = true;
+        bool hadEnv = AtspiEnvPresent();
+        DebugLog("%s; trying to adopt AT-SPI env from pid %d",
+                 hadEnv ? "AT-SPI env present but init failed"
+                        : "AT-SPI env missing in current process",
+                 pid);
+        if (AdoptAtspiEnv(pid)) {
+            DebugLog("Retrying AT-SPI init after adopting environment");
             if (TryAtspiInit()) {
                 initialized = true;
                 return true;
             }
+        } else {
+            DebugLog("Adopting AT-SPI variables from pid %d failed; cannot retry", pid);
         }
     }
 
