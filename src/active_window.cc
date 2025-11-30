@@ -965,8 +965,8 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
     return bestUrl;
 }
 
-AtspiAccessible* FindAccessibleByName(const std::string& processName, const std::string& windowTitle) {
-    if (processName.empty()) {
+AtspiAccessible* FindAccessibleByTitle(const std::string& windowTitle) {
+    if (windowTitle.empty()) {
         return nullptr;
     }
     
@@ -995,61 +995,35 @@ AtspiAccessible* FindAccessibleByName(const std::string& processName, const std:
                 continue;
             }
 
-            GError* nameError = nullptr;
-            gchar* nameChars = atspi_accessible_get_name(app, &nameError);
-            FreeGError(nameError);
-            std::string appName = nameChars ? ToLower(nameChars) : std::string();
-            if (nameChars) {
-                g_free(nameChars);
-            }
+            // We iterate ALL apps now, ignoring process name mismatch issues
+            GError* appChildCountError = nullptr;
+            gint appChildCount = atspi_accessible_get_child_count(app, &appChildCountError);
+            FreeGError(appChildCountError);
 
-            if (appName.find(processName) != std::string::npos) {
-                // Found a matching app, now check its children (Windows) for title match
-                GError* appChildCountError = nullptr;
-                gint appChildCount = atspi_accessible_get_child_count(app, &appChildCountError);
-                FreeGError(appChildCountError);
+            for (gint j = 0; j < appChildCount; ++j) {
+                GError* winError = nullptr;
+                AtspiAccessible* window = atspi_accessible_get_child_at_index(app, j, &winError);
+                FreeGError(winError);
+                if (!window) continue;
 
-                for (gint j = 0; j < appChildCount; ++j) {
-                    GError* winError = nullptr;
-                    AtspiAccessible* window = atspi_accessible_get_child_at_index(app, j, &winError);
-                    FreeGError(winError);
-                    if (!window) continue;
-
-                    GError* winNameError = nullptr;
-                    gchar* winNameChars = atspi_accessible_get_name(window, &winNameError);
-                    FreeGError(winNameError);
-                    std::string winName = winNameChars ? ToLower(winNameChars) : std::string();
-                    if (winNameChars) {
-                        g_free(winNameChars);
-                    }
-                    
-                    // Check if window name matches title (or contains it, or vice versa)
-                    // Browsers often append " - Browser Name" to the title
-                    if (!lowerTitle.empty() && !winName.empty()) {
-                         if (winName == lowerTitle || winName.find(lowerTitle) != std::string::npos || lowerTitle.find(winName) != std::string::npos) {
-                             DebugLog("Found accessibility window by title match: '%s' (App: '%s')", winName.c_str(), appName.c_str());
-                             g_object_unref(app);
-                             g_object_unref(desktop);
-                             return window;
-                         }
-                    }
-                    
-                    // Fallback: check if window is active/focused if title match fails or title is empty
-                    AtspiStateSet* states = atspi_accessible_get_state_set(window);
-                    bool isActive = false;
-                    if (states) {
-                        isActive = atspi_state_set_contains(states, ATSPI_STATE_ACTIVE) ||
-                                   atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
-                        g_object_unref(states);
-                    }
-                    if (isActive) {
-                         DebugLog("Found accessibility window by active state: '%s' (App: '%s')", winName.c_str(), appName.c_str());
-                         g_object_unref(app);
-                         g_object_unref(desktop);
-                         return window;
-                    }
-                    g_object_unref(window);
+                GError* winNameError = nullptr;
+                gchar* winNameChars = atspi_accessible_get_name(window, &winNameError);
+                FreeGError(winNameError);
+                std::string winName = winNameChars ? ToLower(winNameChars) : std::string();
+                if (winNameChars) {
+                    g_free(winNameChars);
                 }
+                
+                // Check if window name matches title (or contains it, or vice versa)
+                if (!winName.empty()) {
+                        if (winName == lowerTitle || winName.find(lowerTitle) != std::string::npos || lowerTitle.find(winName) != std::string::npos) {
+                            DebugLog("Found accessibility window by global title match: '%s'", winName.c_str());
+                            g_object_unref(app);
+                            g_object_unref(desktop);
+                            return window;
+                        }
+                }
+                g_object_unref(window);
             }
             g_object_unref(app);
         }
@@ -1061,10 +1035,10 @@ AtspiAccessible* FindAccessibleByName(const std::string& processName, const std:
 std::string QueryBrowserUrl(pid_t pid, const std::string& processName, const std::string& windowTitle) {
     AtspiAccessible* root = FindAccessibleForPid(pid);
     if (!root) {
-        DebugLog("No accessibility root found for pid %d, trying name match for %s", pid, processName.c_str());
+        DebugLog("No accessibility root found for pid %d, trying global title match for '%s'", pid, windowTitle.c_str());
         // Ensure env is set up even if we search by name, using the PID we have
         EnsureAtspiInitializedForPid(pid);
-        root = FindAccessibleByName(processName, windowTitle);
+        root = FindAccessibleByTitle(windowTitle);
     }
 
     if (!root) {
