@@ -177,6 +177,7 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -405,6 +406,105 @@ void FreeGError(GError*& error) {
     }
 }
 
+std::string ReadBinaryFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::string();
+    }
+    std::string data((std::istreambuf_iterator<char>(file)),
+                     std::istreambuf_iterator<char>());
+    return data;
+}
+
+std::string ExtractEnvValue(const std::string& block, const std::string& key) {
+    if (block.empty()) {
+        return std::string();
+    }
+    size_t offset = 0;
+    while (offset < block.size()) {
+        size_t end = block.find('\0', offset);
+        if (end == std::string::npos) {
+            end = block.size();
+        }
+        if (end > offset) {
+            std::string entry = block.substr(offset, end - offset);
+            size_t equals = entry.find('=');
+            if (equals != std::string::npos && entry.compare(0, equals, key) == 0 &&
+                equals + 1 <= entry.size()) {
+                return entry.substr(equals + 1);
+            }
+        }
+        offset = end + 1;
+    }
+    return std::string();
+}
+
+bool AdoptAtspiEnvFromProcess(pid_t pid) {
+    std::string path = "/proc/" + std::to_string(pid) + "/environ";
+    std::string data = ReadBinaryFile(path);
+    if (data.empty()) {
+        DebugLog("Failed to read /proc/%d/environ", pid);
+        return false;
+    }
+
+    auto setIfMissing = [&](const char* name) {
+        const char* current = std::getenv(name);
+        if (current && current[0] != '\0') {
+            return false;
+        }
+        std::string value = ExtractEnvValue(data, name);
+        if (value.empty()) {
+            return false;
+        }
+        setenv(name, value.c_str(), 1);
+        DebugLog("Adopted %s from pid %d", name, pid);
+        return true;
+    };
+
+    bool updated = false;
+    updated = setIfMissing("DBUS_SESSION_BUS_ADDRESS") || updated;
+    updated = setIfMissing("AT_SPI_BUS_ADDRESS") || updated;
+    if (!updated) {
+        DebugLog("Process %d environment did not provide missing AT-SPI variables", pid);
+    }
+    return updated;
+}
+
+bool TryAtspiInit() {
+    bool ok = atspi_init();
+    DebugLog("AT-SPI init %s", ok ? "succeeded" : "FAILED");
+    return ok;
+}
+
+bool EnsureAtspiInitializedForPid(pid_t pid) {
+    static bool initialized = false;
+    static bool attemptedDefault = false;
+    static bool attemptedAdopt = false;
+    if (initialized) {
+        return true;
+    }
+
+    if (!attemptedDefault) {
+        attemptedDefault = true;
+        if (TryAtspiInit()) {
+            initialized = true;
+            return true;
+        }
+    }
+
+    if (!attemptedAdopt) {
+        attemptedAdopt = true;
+        if (AdoptAtspiEnvFromProcess(pid)) {
+            if (TryAtspiInit()) {
+                initialized = true;
+                return true;
+            }
+        }
+    }
+
+    return initialized;
+}
+
 std::string Trim(const std::string& value) {
     const std::string whitespace = " \t\n\r";
     size_t start = value.find_first_not_of(whitespace);
@@ -481,18 +581,6 @@ const BrowserLocator& GetBrowserLocator(const std::string& processName) {
     }
     static const BrowserLocator kDefault = {"", {"address", "search", "url", "omnibox"}};
     return kDefault;
-}
-
-bool EnsureAtspiInitialized() {
-    static bool attempted = false;
-    static bool initialized = false;
-    if (attempted) {
-        return initialized;
-    }
-    attempted = true;
-    initialized = atspi_init();
-    DebugLog("AT-SPI init %s", initialized ? "succeeded" : "FAILED");
-    return initialized;
 }
 
 int ScoreEntryNode(AtspiAccessible* node, const BrowserLocator& locator) {
@@ -676,7 +764,7 @@ AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNo
 }
 
 AtspiAccessible* FindAccessibleForPid(pid_t pid) {
-    if (!EnsureAtspiInitialized()) {
+    if (!EnsureAtspiInitializedForPid(pid)) {
         return nullptr;
     }
 
