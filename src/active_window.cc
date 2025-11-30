@@ -571,6 +571,42 @@ void ReleaseQueue(std::deque<AtspiAccessible*>& queue) {
     }
 }
 
+AtspiAccessible* PromoteToPidAncestor(AtspiAccessible* start, pid_t pid) {
+    if (!start) {
+        return nullptr;
+    }
+
+    const int kMaxDepth = 32;
+    AtspiAccessible* current = g_object_ref(start);
+    AtspiAccessible* best = nullptr;
+
+    for (int depth = 0; depth < kMaxDepth && current; ++depth) {
+        GError* pidError = nullptr;
+        gint currentPid = atspi_accessible_get_process_id(current, &pidError);
+        FreeGError(pidError);
+        if (currentPid == pid) {
+            if (best) {
+                g_object_unref(best);
+            }
+            best = g_object_ref(current);
+        } else if (best) {
+            break;
+        }
+
+        GError* parentError = nullptr;
+        AtspiAccessible* parent = atspi_accessible_get_parent(current, &parentError);
+        FreeGError(parentError);
+        if (!parent) {
+            break;
+        }
+        g_object_unref(current);
+        current = parent;
+    }
+
+    g_object_unref(current);
+    return best;
+}
+
 AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNodes) {
     if (!root) {
         return nullptr;
@@ -585,12 +621,11 @@ AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNo
         queue.pop_front();
         ++visited;
 
-        GError* pidError = nullptr;
-        gint nodePid = atspi_accessible_get_process_id(node, &pidError);
-        FreeGError(pidError);
-        if (nodePid == pid) {
+        AtspiAccessible* match = PromoteToPidAncestor(node, pid);
+        if (match) {
             ReleaseQueue(queue);
-            return node;
+            g_object_unref(node);
+            return match;
         }
 
         GError* countError = nullptr;
@@ -654,7 +689,7 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
         return std::string();
     }
 
-    const size_t kMaxNodes = 6000;
+    const size_t kMaxNodes = 15000;
     std::deque<AtspiAccessible*> queue;
     queue.push_back(g_object_ref(root));
     size_t visited = 0;
