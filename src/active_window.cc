@@ -167,6 +167,7 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <X11/Xutil.h>
 #include <atspi/atspi.h>
 #include <unistd.h>
+#include <sys/types.h>
 
 #include <algorithm>
 #include <cctype>
@@ -471,11 +472,12 @@ bool AdoptAtspiEnvFromProcess(pid_t pid) {
     return updated;
 }
 
-uid_t ReadProcessUid(pid_t pid) {
+uid_t ReadProcessUid(pid_t pid, bool& exact) {
     std::string path = "/proc/" + std::to_string(pid) + "/status";
     std::ifstream file(path);
     if (!file) {
         DebugLog("Failed to open %s", path.c_str());
+        exact = false;
         return static_cast<uid_t>(-1);
     }
     std::string line;
@@ -485,16 +487,18 @@ uid_t ReadProcessUid(pid_t pid) {
             long uidValue = -1;
             stream >> uidValue;
             if (uidValue >= 0) {
+                exact = true;
                 return static_cast<uid_t>(uidValue);
             }
             break;
         }
     }
     DebugLog("Could not read UID for pid %d", pid);
+    exact = false;
     return static_cast<uid_t>(-1);
 }
 
-bool AdoptAtspiEnvFromUid(uid_t uid) {
+bool AdoptAtspiEnvFromUid(uid_t uid, bool exactUid) {
     if (uid == static_cast<uid_t>(-1)) {
         return false;
     }
@@ -519,7 +523,8 @@ bool AdoptAtspiEnvFromUid(uid_t uid) {
         updated = setVar("AT_SPI_BUS_ADDRESS", "unix:path=" + atspiPath) || updated;
     }
     if (!updated) {
-        DebugLog("Could not synthesize AT-SPI env for uid %s", uidStr.c_str());
+        DebugLog("Could not synthesize AT-SPI env for uid %s%s", uidStr.c_str(),
+                 exactUid ? "" : " (guessed)");
     }
     return updated;
 }
@@ -528,8 +533,25 @@ bool AdoptAtspiEnv(pid_t pid) {
     if (AdoptAtspiEnvFromProcess(pid)) {
         return true;
     }
-    uid_t uid = ReadProcessUid(pid);
-    if (uid != static_cast<uid_t>(-1) && AdoptAtspiEnvFromUid(uid)) {
+    bool exactUid = false;
+    uid_t uid = ReadProcessUid(pid, exactUid);
+    if (uid != static_cast<uid_t>(-1) && AdoptAtspiEnvFromUid(uid, exactUid)) {
+        return true;
+    }
+    if (gid_t gid = getgid(); gid >= 0) {
+        if (AdoptAtspiEnvFromUid(static_cast<uid_t>(gid), false)) {
+            return true;
+        }
+    }
+    const char* userEnv = std::getenv("SUDO_UID");
+    if (userEnv) {
+        long sudoUid = std::strtol(userEnv, nullptr, 10);
+        if (sudoUid >= 0 && AdoptAtspiEnvFromUid(static_cast<uid_t>(sudoUid), false)) {
+            return true;
+        }
+    }
+    uid_t realUid = getuid();
+    if (realUid != uid && AdoptAtspiEnvFromUid(realUid, false)) {
         return true;
     }
     return false;
