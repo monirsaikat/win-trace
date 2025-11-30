@@ -571,12 +571,52 @@ void ReleaseQueue(std::deque<AtspiAccessible*>& queue) {
     }
 }
 
+AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNodes) {
+    if (!root) {
+        return nullptr;
+    }
+
+    std::deque<AtspiAccessible*> queue;
+    queue.push_back(g_object_ref(root));
+    size_t visited = 0;
+
+    while (!queue.empty() && visited < maxNodes) {
+        AtspiAccessible* node = queue.front();
+        queue.pop_front();
+        ++visited;
+
+        GError* pidError = nullptr;
+        gint nodePid = atspi_accessible_get_process_id(node, &pidError);
+        FreeGError(pidError);
+        if (nodePid == pid) {
+            ReleaseQueue(queue);
+            return node;
+        }
+
+        GError* countError = nullptr;
+        gint childCount = atspi_accessible_get_child_count(node, &countError);
+        FreeGError(countError);
+        for (gint i = 0; i < childCount; ++i) {
+            GError* childError = nullptr;
+            AtspiAccessible* child = atspi_accessible_get_child_at_index(node, i, &childError);
+            FreeGError(childError);
+            if (child) {
+                queue.push_back(child);
+            }
+        }
+        g_object_unref(node);
+    }
+
+    ReleaseQueue(queue);
+    return nullptr;
+}
+
 AtspiAccessible* FindAccessibleForPid(pid_t pid) {
     if (!EnsureAtspiInitialized()) {
         return nullptr;
     }
 
-    const size_t kMaxVisitedPerDesktop = 2048;
+    const size_t kMaxNodesPerApp = 20000;
     gint desktopCount = atspi_get_desktop_count();
 
     for (gint desktopIndex = 0; desktopIndex < desktopCount; ++desktopIndex) {
@@ -585,48 +625,25 @@ AtspiAccessible* FindAccessibleForPid(pid_t pid) {
             continue;
         }
 
-        std::deque<AtspiAccessible*> queue;
-        queue.push_back(g_object_ref(desktop));
-        size_t visited = 0;
-        AtspiAccessible* match = nullptr;
-
-        while (!queue.empty() && visited < kMaxVisitedPerDesktop) {
-            AtspiAccessible* node = queue.front();
-            queue.pop_front();
-            ++visited;
-
-            GError* pidError = nullptr;
-            gint nodePid = atspi_accessible_get_process_id(node, &pidError);
-            FreeGError(pidError);
-            if (nodePid == pid) {
-                match = node;
-                ReleaseQueue(queue);
-                break;
+        GError* countError = nullptr;
+        gint childCount = atspi_accessible_get_child_count(desktop, &countError);
+        FreeGError(countError);
+        for (gint i = 0; i < childCount; ++i) {
+            GError* childError = nullptr;
+            AtspiAccessible* child = atspi_accessible_get_child_at_index(desktop, i, &childError);
+            FreeGError(childError);
+            if (!child) {
+                continue;
             }
 
-            GError* countError = nullptr;
-            gint childCount = atspi_accessible_get_child_count(node, &countError);
-            FreeGError(countError);
-            for (gint i = 0; i < childCount; ++i) {
-                GError* childError = nullptr;
-                AtspiAccessible* child = atspi_accessible_get_child_at_index(node, i, &childError);
-                FreeGError(childError);
-                if (child) {
-                    queue.push_back(child);
-                }
-            }
-            g_object_unref(node);
-        }
-
-        if (match) {
-            ReleaseQueue(queue);
-            if (desktop != match) {
+            AtspiAccessible* match = SearchTreeForPid(child, pid, kMaxNodesPerApp);
+            g_object_unref(child);
+            if (match) {
                 g_object_unref(desktop);
+                return match;
             }
-            return match;
         }
 
-        ReleaseQueue(queue);
         g_object_unref(desktop);
     }
     return nullptr;
