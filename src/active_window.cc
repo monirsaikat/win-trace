@@ -172,6 +172,9 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <cctype>
 #include <climits>
 #include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <string>
@@ -180,6 +183,29 @@ bool GetActiveWindowInfo(ActiveWindowInfo& info) {
 #include <glib.h>
 
 namespace {
+
+bool DebugEnabled() {
+    static bool enabled = []() {
+        const char* env = std::getenv("WIN_TRACE_DEBUG");
+        if (!env || env[0] == '\0') {
+            return false;
+        }
+        return !(env[0] == '0' && env[1] == '\0');
+    }();
+    return enabled;
+}
+
+void DebugLog(const char* format, ...) {
+    if (!DebugEnabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[win-trace] ");
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+    std::fprintf(stderr, "\n");
+}
 
 class DisplayHandle {
    public:
@@ -465,6 +491,7 @@ bool EnsureAtspiInitialized() {
     }
     attempted = true;
     initialized = atspi_init();
+    DebugLog("AT-SPI init %s", initialized ? "succeeded" : "FAILED");
     return initialized;
 }
 
@@ -623,6 +650,7 @@ AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNo
 
         AtspiAccessible* match = PromoteToPidAncestor(node, pid);
         if (match) {
+            DebugLog("Matched pid %d after visiting %zu nodes in subtree", pid, visited);
             ReleaseQueue(queue);
             g_object_unref(node);
             return match;
@@ -643,6 +671,7 @@ AtspiAccessible* SearchTreeForPid(AtspiAccessible* root, pid_t pid, size_t maxNo
     }
 
     ReleaseQueue(queue);
+    DebugLog("SearchTreeForPid hit limit (%zu nodes) without finding pid %d", maxNodes, pid);
     return nullptr;
 }
 
@@ -663,6 +692,8 @@ AtspiAccessible* FindAccessibleForPid(pid_t pid) {
         GError* countError = nullptr;
         gint childCount = atspi_accessible_get_child_count(desktop, &countError);
         FreeGError(countError);
+        DebugLog("Desktop %d/%d has %d children while searching for pid %d", desktopIndex + 1,
+                 desktopCount, childCount, pid);
         for (gint i = 0; i < childCount; ++i) {
             GError* childError = nullptr;
             AtspiAccessible* child = atspi_accessible_get_child_at_index(desktop, i, &childError);
@@ -674,6 +705,8 @@ AtspiAccessible* FindAccessibleForPid(pid_t pid) {
             AtspiAccessible* match = SearchTreeForPid(child, pid, kMaxNodesPerApp);
             g_object_unref(child);
             if (match) {
+                DebugLog("Found accessibility root for pid %d on desktop %d child %d", pid,
+                         desktopIndex, i);
                 g_object_unref(desktop);
                 return match;
             }
@@ -709,6 +742,8 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
                     bestScore = score;
                     bestUrl = value;
                     if (score >= 6 && value.find("://") != std::string::npos) {
+                        DebugLog("URL candidate '%s' accepted with score %d", value.c_str(),
+                                 score);
                         g_object_unref(node);
                         break;
                     }
@@ -731,12 +766,20 @@ std::string SearchAddressBar(AtspiAccessible* root, const BrowserLocator& locato
     }
 
     ReleaseQueue(queue);
+    if (!bestUrl.empty()) {
+        DebugLog("SearchAddressBar found URL '%s' after visiting %zu nodes", bestUrl.c_str(),
+                 visited);
+    } else {
+        DebugLog("SearchAddressBar failed to find URL after visiting %zu nodes (best score %d)",
+                 visited, bestScore);
+    }
     return bestUrl;
 }
 
 std::string QueryBrowserUrl(pid_t pid, const std::string& processName) {
     AtspiAccessible* root = FindAccessibleForPid(pid);
     if (!root) {
+        DebugLog("No accessibility root found for pid %d (%s)", pid, processName.c_str());
         return std::string();
     }
 
